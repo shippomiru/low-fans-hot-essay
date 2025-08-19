@@ -35,6 +35,43 @@ class WechatArticleCollector:
         self.db = DatabaseManager()
         self.current_balance = 0
         self.task_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 初始化时获取当前余额
+        self.update_balance()
+    
+    # ==================== 余额查询 ====================
+    
+    def get_remain_money(self) -> float:
+        """
+        调用接口获取当前余额（不消耗费用）
+        Returns:
+            当前余额，失败返回0
+        """
+        url = f"{self.base_url}/get_remain_money"
+        payload = {
+            "key": self.api_key,
+            "verifycode": ""
+        }
+        headers = {"Content-Type": "application/json"}
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get('code') == 0:
+                return result.get('remain_money', 0)
+            else:
+                print(f"  ⚠️ 获取余额失败: {result.get('msg', '未知错误')}")
+                return 0
+        except Exception as e:
+            print(f"  ⚠️ 获取余额异常: {e}")
+            return 0
+    
+    def update_balance(self):
+        """更新当前余额"""
+        self.current_balance = self.get_remain_money()
+        print(f"  💰 当前余额: {self.current_balance} 元")
     
     # ==================== API调用方法 ====================
     
@@ -49,8 +86,9 @@ class WechatArticleCollector:
         cached = self.db.get_raw_response("post_history", request_key)
         if cached:
             print(f"  📦 使用缓存数据 (biz={biz}, page={page})")
-            # 更新余额（使用缓存中的余额）
-            self.current_balance = cached.get('remain_money', 0)
+            # 只有成功的响应才更新余额
+            if cached.get('code') == 0 and cached.get('remain_money') is not None:
+                self.current_balance = cached.get('remain_money', 0)
             return cached
         
         # 请求参数
@@ -93,8 +131,12 @@ class WechatArticleCollector:
         cached = self.db.get_raw_response("read_zan_pro", request_key)
         if cached:
             print(f"    📦 使用缓存数据")
-            # 更新余额（使用缓存中的余额）
-            self.current_balance = cached.get('remain_money', 0)
+            # 只有成功的响应才更新余额，错误响应（如文章已删除）不更新
+            if cached.get('code') == 0 and cached.get('remain_money') is not None:
+                self.current_balance = cached.get('remain_money', 0)
+            elif cached.get('code') == 101:
+                # 文章已删除或违规，不需要重试
+                print(f"    ⚠️ 文章不可访问: {cached.get('msg', '未知原因')}")
             return cached
         
         payload = {
@@ -133,8 +175,12 @@ class WechatArticleCollector:
         cached = self.db.get_raw_response("article_detail", request_key)
         if cached:
             print(f"    📦 使用缓存数据")
-            # 更新余额（使用缓存中的余额）
-            self.current_balance = cached.get('remain_money', 0)
+            # 只有成功的响应才更新余额，错误响应（如文章已删除）不更新
+            if cached.get('code') == 0 and cached.get('remain_money') is not None:
+                self.current_balance = cached.get('remain_money', 0)
+            elif cached.get('code') == 101:
+                # 文章已删除或违规，不需要重试
+                print(f"    ⚠️ 文章不可访问: {cached.get('msg', '未知原因')}")
             return cached
         
         params = {
@@ -304,6 +350,11 @@ class WechatArticleCollector:
                     
                     status = 'stats_fetched'
                     time.sleep(0.3)
+                elif result and result.get('code') == 101:
+                    # 文章已删除或违规，标记为特殊状态，不再重试
+                    print(f"    ⏭️ 跳过不可访问的文章")
+                    # 可以考虑更新文章状态为'unavailable'或直接跳过
+                    continue
                 else:
                     print(f"    ❌ 获取统计数据失败")
                     continue
@@ -419,14 +470,29 @@ class WechatArticleCollector:
                 # 完全完成
                 completed.append(acc['nick_name'])
         
-        # 3. 显示采集状态
+        # 3. 检查是否有未开始的公众号
+        from config import TARGET_ACCOUNTS
+        collected_biz = [acc['biz'] for acc in all_accounts]
+        not_started = []
+        for biz, nick_name in TARGET_ACCOUNTS:
+            if biz not in collected_biz:
+                not_started.append((biz, nick_name))
+        
+        # 4. 显示采集状态
         print(f"\n📊 采集状态统计:")
-        print(f"  总公众号数: {len(all_accounts)}")
+        print(f"  配置的公众号总数: {len(TARGET_ACCOUNTS)}")
+        print(f"  数据库中的公众号: {len(all_accounts)}")
+        print(f"  未开始采集: {len(not_started)} 个")
         print(f"  需继续获取列表: {len(need_list)} 个")
         print(f"  仅需获取文章详情: {len(need_details_only)} 个")
         print(f"  已完成: {len(completed)} 个")
         
-        if not need_list and not need_details_only:
+        if not_started:
+            print("\n未开始采集的公众号:")
+            for biz, name in not_started:
+                print(f"  - {name}")
+        
+        if not need_list and not need_details_only and not not_started:
             print("\n✅ 所有采集任务已完成！")
             if completed:
                 print("已完成的公众号:")
@@ -465,7 +531,24 @@ class WechatArticleCollector:
                     print("\n⚠️ 余额不足，采集中断")
                     return
         
-        # 6. 显示最终统计
+        # 6. 处理未开始的公众号
+        if not_started:
+            print(f"\n📝 第三步：开始新的公众号采集")
+            print(f"  需要采集 {len(not_started)} 个新公众号")
+            
+            for idx, (biz, nick_name) in enumerate(not_started, 1):
+                print(f"\n  [{idx}/{len(not_started)}] 开始采集: {nick_name}")
+                
+                success = self.collect_account_articles(biz, nick_name)
+                
+                if not success:
+                    print("\n⚠️ 采集中断（余额不足或错误）")
+                    return
+                
+                if idx < len(not_started):
+                    time.sleep(1)  # 公众号之间的延迟
+        
+        # 7. 显示最终统计
         print("\n" + "="*60)
         self.print_statistics()
     
