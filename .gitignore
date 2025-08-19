@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# API Keys and Credentials
+.env
+config.ini
+secrets.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+accounts_info.json
+test/
+*.log
+
+# Virtual Environment
+venv/
+bin/
+lib/
+include/
+pyvenv.cfg
